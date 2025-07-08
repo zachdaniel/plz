@@ -8,21 +8,71 @@ prompt="You are being used as a terminal assistant."
 # Parse the pipeline if we have the full command
 if [ -n "$full_cmd" ]; then
   
-  # Extract everything before 'plz' in the pipeline
-  before_plz=$(echo "$full_cmd" | sed -E 's/^(.*[|])?[[:space:]]*plz.*$/\1/' | sed 's/[[:space:]]*[|][[:space:]]*$//')
+  # Find which plz instance we are by matching our arguments
+  # Get the first positional argument to identify this plz instance
+  first_arg=""
+  for arg in "$@"; do
+    if [[ "$arg" != -* ]]; then
+      first_arg="$arg"
+      break
+    fi
+  done
   
-  # Extract everything after the current plz command in the pipeline
-  # Look for: plz "args" | rest_of_pipeline
-  if echo "$full_cmd" | grep -qE 'plz[[:space:]]+[^|]+\|'; then
-    # Use a simpler approach: find plz, skip to the next |, then get everything after
-    after_plz=$(echo "$full_cmd" | sed -E 's/^.*plz[[:space:]]+[^|]+\|[[:space:]]*(.*)$/\1/')
-    # Check if the extraction actually worked
-    if [ "$after_plz" = "$full_cmd" ]; then
+  if [ -n "$first_arg" ]; then
+    
+    # Find our position by looking for our specific argument
+    # Split the command on plz and find which occurrence has our argument
+    plz_count=0
+    our_position=0
+    
+    # Count plz occurrences and find ours
+    while IFS= read -r line; do
+      if echo "$line" | grep -q "plz.*$first_arg"; then
+        our_position=$((plz_count + 1))
+        break
+      fi
+      if echo "$line" | grep -q "plz"; then
+        plz_count=$((plz_count + 1))
+      fi
+    done <<< "$(echo "$full_cmd" | tr '|' '\n')"
+    
+    # Now extract before/after based on our position
+    if [ "$our_position" -gt 0 ]; then
+      # Escape the first_arg for use in regex
+      escaped_arg=$(echo "$first_arg" | sed 's/[[\.*^$()+?{|]/\\&/g')
+      
+      # Use basic string manipulation to find plz boundaries
+      # Remove newlines to make parsing easier
+      clean_cmd=$(echo "$full_cmd" | tr '\n' ' ')
+      
+      if [ "$our_position" -eq 1 ]; then
+        # First plz: find first " | plz" and split there
+        before_plz=$(echo "$clean_cmd" | sed 's/ | plz.*//')
+        # Find everything after first plz ends (look for next |)
+        after_temp=$(echo "$clean_cmd" | sed 's/^[^|]*| plz[^|]*| *//')
+        if [ "$after_temp" != "$clean_cmd" ]; then
+          after_plz="$after_temp"
+        else
+          after_plz=""
+        fi
+      elif [ "$our_position" -eq 2 ]; then
+        # Second plz: find everything before the last " | plz"
+        before_plz=$(echo "$clean_cmd" | sed 's/ | plz[^|]*$//')
+        after_plz=""
+      else
+        before_plz=""
+        after_plz=""
+      fi
+    else
+      before_plz=""
       after_plz=""
     fi
   else
+    # Fallback to old behavior if we can't identify our argument
+    before_plz=$(echo "$full_cmd" | sed -E 's/^(.*[|])?[[:space:]]*plz.*$/\1/' | sed 's/[[:space:]]*[|][[:space:]]*$//')
     after_plz=""
   fi
+  
   
   if [ -n "$before_plz" ]; then
     prompt="$prompt
