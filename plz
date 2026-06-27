@@ -3,7 +3,15 @@
 # Get the full command line
 full_cmd="${PLZ_FULL_CMD:-}"
 
-prompt="You are being used as a terminal assistant."
+# Detect the user's interactive shell so commands match its syntax
+shell_name=$(ps -o comm= -p "$PPID" 2>/dev/null | sed 's#.*/##; s/^-//')
+[ -z "$shell_name" ] && shell_name=$(basename "${SHELL:-sh}")
+
+prompt="You are being used as a terminal assistant.
+
+The user's interactive shell is: $shell_name
+- Commands you put in <cmd> are executed for you via bash, so write those in POSIX/bash syntax.
+- The piped input was produced by $shell_name. If that shell renders structured output as tables (e.g. nushell draws tables with box-drawing characters like │ and ─), do NOT treat it as plain columns — account for the actual format."
 
 # Parse the pipeline if we have the full command
 if [ -n "$full_cmd" ]; then
@@ -91,10 +99,11 @@ Output will be piped to:
 $after_plz
 </piped_to>
 
-IMPORTANT: Your output will be piped to '$after_plz'. You MUST output in a format that this command expects. For example:
-- If piping to 'jq', output valid JSON only
-- If piping to 'sed' or 'awk', output text that these commands can process
-- If piping to 'grep', output text with the expected patterns"
+IMPORTANT: Your output is NOT shown to a human — it is fed directly into '$after_plz'. It MUST be machine-readable data in exactly the format that command expects. Do NOT write prose, sentences, or explanations. For example:
+- If piping to 'jq', output valid JSON ONLY (e.g. {\"username\":\"x\",\"location\":null}), never a sentence
+- If piping to 'sed' or 'awk', output the raw text/columns those commands process
+- If piping to 'grep', output text with the expected patterns
+Because the output is consumed by another program, you should almost always use <cmd> to produce it. Use <response> ONLY if its content is itself valid input for '$after_plz'."
 
   fi
 fi
@@ -124,29 +133,19 @@ fi
 prompt="$prompt
 
 RESPONSE FORMAT RULES:
-You MUST respond in ONE of these formats:
+plz DOES THINGS. You always run a command to accomplish what the user asked — never explain, never answer in prose, never print a command for the user to copy. Respond in ONE of these formats:
 
-1. To pipe the input through a command to process/transform it:
+1. To accomplish the task, run a command (it receives the piped input on stdin):
 <cmd>command here</cmd>
 IMPORTANT: If your command needs to exit with an error, use exit code 42 (not 1) to avoid retries.
 
-2. To provide a direct response without processing the input:
-<response>your response here</response>
-
-3. To exit with an error message and non-zero exit code:
+2. To exit with an error message and non-zero exit code:
 <error>error message here</error>
 
-4. To request the full input (if you need more than the preview):
+3. To request the full input (if you need more than the preview):
 </get_output>
 
-DECISION GUIDE:
-- If the user asks to extract, filter, transform, format, process, get, find, or otherwise manipulate the piped input → use <cmd>
-- If the user asks you to \"give me a command\", \"show me a command\", \"what command should I use\", or wants to see/receive a command → use <response> to display the command
-- If you need to analyze or answer questions about the input → use <response>
-- When in doubt, if there is piped input and the user wants something done TO that input → use <cmd>
-
-CRITICAL: When the user says \"give me\" or \"show me\" a command, they want to SEE the command text, not run it. Use <response> to show them the command.
-NEVER use <cmd> when the user is asking for a command to be displayed to them.
+ALWAYS just do the thing with <cmd>. Whatever the user asks — extract, filter, transform, format, get, find, fetch, even \"give me a command to ...\" — write the command that does it and let it run. The command's own output is the result. Be terse: no commentary, no preamble.
 
 DO NOT include any text outside these tags.
 "
@@ -175,7 +174,9 @@ fi
 # Function to get Claude's response
 get_claude_response() {
   local prompt_to_send="$1"
-  echo "$prompt_to_send" | /Users/zachdaniel/.claude/local/claude --dangerously-skip-permissions "${args[@]}"
+  # Filter out the claude.ai connectors warning while keeping other stderr
+  echo "$prompt_to_send" | claude --dangerously-skip-permissions "${args[@]}" \
+    2> >(grep -v "claude.ai connectors are disabled" >&2)
 }
 
 # Function to handle response
@@ -238,15 +239,6 @@ Please provide a corrected command using <cmd>corrected_command</cmd> or a direc
     fi
   fi
   
-  # Check for <response> tag (multiline support)
-  if echo "$response" | grep -q "<response>"; then
-    local clean_response=$(echo "$response" | sed -n '/<response>/,/<\/response>/p' | sed '1s/^.*<response>//' | sed '$s/<\/response>.*$//' | sed '/^[[:space:]]*$/d')
-    if [ -n "$clean_response" ]; then
-      echo -n "$clean_response"
-      return 0
-    fi
-  fi
-  
   # Check for <error> tag (multiline support)
   if echo "$response" | grep -q "<error>"; then
     local error_message=$(echo "$response" | sed -n '/<error>/,/<\/error>/p' | sed '1s/^.*<error>//' | sed '$s/<\/error>.*$//' | sed '/^[[:space:]]*$/d')
@@ -265,7 +257,7 @@ $full_piped_input
 </full_piped_input>
 
 Now respond using one of the required formats:
-<cmd>command</cmd> or <response>answer</response>"
+<cmd>command</cmd>"
     
     local new_response=$(get_claude_response "$new_prompt")
     handle_response "$new_response" "$new_prompt" "$retry_count"
@@ -279,8 +271,7 @@ Your previous response was:
 $response
 
 This does not match the required format. Please respond again using ONLY one of these formats:
-<cmd>command to pipe through</cmd>
-<response>direct answer</response>
+<cmd>command to run</cmd>
 <error>error message</error>
 </get_output>"
   
