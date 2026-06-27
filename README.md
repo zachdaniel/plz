@@ -31,27 +31,7 @@ add-zsh-hook preexec _plz_capture_cmd
 
 ## Examples
 
-### Get a command to do something
-
-```nushell
-ls -la | plz "give me a command to extract filenames"
-```
-
-#### Output
-
-##### Nushell
-
-```nushell
-ls | get name
-```
-
-##### Bash
-
-```bash
-ls -la | awk '{print $NF}'
-```
-
-### Or just tell it to do stuff
+### Tell it to do stuff
 
 ```nushell
 ls -la | plz "extract the filenames"
