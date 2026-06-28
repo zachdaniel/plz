@@ -1,245 +1,414 @@
 #!/usr/bin/env bash
+#
+# plz — a terminal assistant you pipe through.
+#
+# Single, portable file. Three roles:
+#   plz "<request>"        run the assistant (the engine)
+#   plz init <zsh|nu>      print shell glue to wire up pipeline-awareness
+#   plz __locate ...       internal: locate this call within a tokenized pipeline
+#
+# Pipeline context (what you pipe from / to) is computed in the shell glue,
+# using each shell's own tokenizer ((z) in zsh, `ast` in nushell), then handed
+# to the engine via --piped-from / --piped-to. The engine never parses the
+# command line itself.
 
-# Get the full command line
-full_cmd="${PLZ_FULL_CMD:-}"
+# ---------------------------------------------------------------------------
+# helpers shared by the internal modes
+# ---------------------------------------------------------------------------
 
-# Detect the user's interactive shell so commands match its syntax
-shell_name=$(ps -o comm= -p "$PPID" 2>/dev/null | sed 's#.*/##; s/^-//')
-[ -z "$shell_name" ] && shell_name=$(basename "${SHELL:-sh}")
+plz_unquote() {
+  local s="$1"
+  case "$s" in
+    \"*\") s="${s#\"}"; s="${s%\"}" ;;
+    \'*\') s="${s#\'}"; s="${s%\'}" ;;
+    \`*\`) s="${s#\`}"; s="${s%\`}" ;;
+  esac
+  printf '%s' "$s"
+}
 
-prompt="You are being used as a terminal assistant.
+# do_locate: given this call's args ("$@") and a tokenized pipeline on stdin
+# (one token per line; a lone "|" is a pipe operator; ";" "&&" "||" "&" start a
+# new pipeline group), print exactly three lines:
+#   line 1: "ok" or "ambiguous"
+#   line 2: piped-from text (may be empty)
+#   line 3: piped-to text   (may be empty)
+do_locate() {
+  local my_args="$*"
+  local -a toks=()
+  local line
+  # `|| [ -n "$line" ]` also captures a final line with no trailing newline
+  # (nushell's `str join` produces no trailing newline; zsh's printf does).
+  while IFS= read -r line || [ -n "$line" ]; do toks+=("$line"); done
 
-The user's interactive shell is: $shell_name
-- Commands you put in <cmd> are executed for you via bash, so write those in POSIX/bash syntax.
-- The piped input was produced by $shell_name. If that shell renders structured output as tables (e.g. nushell draws tables with box-drawing characters like │ and ─), do NOT treat it as plain columns — account for the actual format."
+  local -a S_TEXT=() S_ARGS=() S_GROUP=() S_ISPLZ=()
+  local group=0 cur_text="" cur_args="" cur_first="" started=0
 
-# Parse the pipeline if we have the full command
-if [ -n "$full_cmd" ]; then
-  
-  # Find which plz instance we are by matching our arguments
-  # Get the first positional argument to identify this plz instance
-  first_arg=""
-  for arg in "$@"; do
-    if [[ "$arg" != -* ]]; then
-      first_arg="$arg"
-      break
+  _flush() {
+    if [ "$started" -eq 1 ]; then
+      S_TEXT+=("$cur_text"); S_ARGS+=("$cur_args"); S_GROUP+=("$group")
+      if [ "$cur_first" = "plz" ]; then S_ISPLZ+=(1); else S_ISPLZ+=(0); fi
+    fi
+    cur_text=""; cur_args=""; cur_first=""; started=0
+  }
+
+  local tok uq
+  for tok in "${toks[@]}"; do
+    case "$tok" in
+      "|")
+        _flush ;;
+      ";"|"&&"|"||"|"&"|"|&")
+        _flush; group=$((group+1)) ;;
+      *)
+        if [ "$started" -eq 0 ]; then
+          cur_first="$tok"; cur_text="$tok"; started=1
+        else
+          cur_text="$cur_text $tok"
+          uq="$(plz_unquote "$tok")"
+          if [ -z "$cur_args" ]; then cur_args="$uq"; else cur_args="$cur_args $uq"; fi
+        fi ;;
+    esac
+  done
+  _flush
+
+  local -a cand=()
+  local i
+  for i in "${!S_TEXT[@]}"; do
+    if [ "${S_ISPLZ[$i]}" = "1" ] && [ "${S_ARGS[$i]}" = "$my_args" ]; then
+      cand+=("$i")
     fi
   done
-  
-  if [ -n "$first_arg" ]; then
-    
-    # Find our position by looking for our specific argument
-    # Split the command on plz and find which occurrence has our argument
-    plz_count=0
-    our_position=0
-    
-    # Count plz occurrences and find ours
-    while IFS= read -r line; do
-      if echo "$line" | grep -q "plz.*$first_arg"; then
-        our_position=$((plz_count + 1))
-        break
-      fi
-      if echo "$line" | grep -q "plz"; then
-        plz_count=$((plz_count + 1))
-      fi
-    done <<< "$(echo "$full_cmd" | tr '|' '\n')"
-    
-    # Now extract before/after based on our position
-    if [ "$our_position" -gt 0 ]; then
-      # Escape the first_arg for use in regex
-      escaped_arg=$(echo "$first_arg" | sed 's/[[\.*^$()+?{|]/\\&/g')
-      
-      # Use basic string manipulation to find plz boundaries
-      # Remove newlines to make parsing easier
-      clean_cmd=$(echo "$full_cmd" | tr '\n' ' ')
-      
-      if [ "$our_position" -eq 1 ]; then
-        # First plz: find first " | plz" and split there
-        before_plz=$(echo "$clean_cmd" | sed 's/ | plz.*//')
-        # Find everything after first plz ends (look for next |)
-        after_temp=$(echo "$clean_cmd" | sed 's/^[^|]*| plz[^|]*| *//')
-        if [ "$after_temp" != "$clean_cmd" ]; then
-          after_plz="$after_temp"
-        else
-          after_plz=""
-        fi
-      elif [ "$our_position" -eq 2 ]; then
-        # Second plz: find everything before the last " | plz"
-        before_plz=$(echo "$clean_cmd" | sed 's/ | plz[^|]*$//')
-        after_plz=""
-      else
-        before_plz=""
-        after_plz=""
-      fi
-    else
-      before_plz=""
-      after_plz=""
-    fi
-  else
-    # Fallback to old behavior if we can't identify our argument
-    before_plz=$(echo "$full_cmd" | sed -E 's/^(.*[|])?[[:space:]]*plz.*$/\1/' | sed 's/[[:space:]]*[|][[:space:]]*$//')
-    after_plz=""
-  fi
-  
-  
-  if [ -n "$before_plz" ]; then
-    prompt="$prompt
 
-Input is piped from:
+  if [ "${#cand[@]}" -eq 0 ]; then
+    printf 'ok\n\n\n'; return 0
+  fi
+
+  local total=${#S_TEXT[@]}
+  local idx g p n fi ti f0="" t0="" amb=0 first=1
+  for idx in "${cand[@]}"; do
+    g="${S_GROUP[$idx]}"; p=$((idx-1)); n=$((idx+1)); fi=""; ti=""
+    if [ "$p" -ge 0 ] && [ "${S_GROUP[$p]}" = "$g" ]; then fi="${S_TEXT[$p]}"; fi
+    if [ "$n" -lt "$total" ] && [ "${S_GROUP[$n]}" = "$g" ]; then ti="${S_TEXT[$n]}"; fi
+    if [ "$first" -eq 1 ]; then f0="$fi"; t0="$ti"; first=0
+    elif [ "$fi" != "$f0" ] || [ "$ti" != "$t0" ]; then amb=1; fi
+  done
+
+  if [ "$amb" -eq 1 ]; then printf 'ambiguous\n\n\n'; return 0; fi
+  printf 'ok\n%s\n%s\n' "$f0" "$t0"
+}
+
+# ---------------------------------------------------------------------------
+# init: print shell glue
+# ---------------------------------------------------------------------------
+
+plz_init() {
+  case "${1:-}" in
+    zsh)
+      cat <<'ZSH_GLUE'
+# plz zsh integration.  Add to ~/.zshrc:  eval "$(plz init zsh)"
+typeset -g __PLZ_CMD=""
+autoload -Uz add-zsh-hook 2>/dev/null
+__plz_preexec() { __PLZ_CMD="$1"; }   # captured per command, NOT exported
+add-zsh-hook preexec __plz_preexec 2>/dev/null
+
+plz() {
+  emulate -L zsh
+  local s="" f="" t=""
+  if [[ -n "$__PLZ_CMD" ]]; then
+    local -a toks
+    toks=( ${(z)__PLZ_CMD} )
+    { IFS= read -r s; IFS= read -r f; IFS= read -r t; } < <(
+      printf '%s\n' "${toks[@]}" | command plz __locate "$@"
+    )
+  fi
+  if [[ "$s" == "ambiguous" ]]; then
+    print -u2 "plz: ambiguous pipeline — two identical 'plz' calls with different neighbors. Vary one prompt to disambiguate."
+    return 1
+  fi
+  command plz --shell zsh ${f:+--piped-from "$f"} ${t:+--piped-to "$t"} "$@"
+}
+ZSH_GLUE
+      ;;
+    nu|nushell)
+      cat <<'NU_GLUE'
+# plz nushell integration.  Generate + source once, e.g.:
+#   plz init nu | save -f ($nu.default-config-dir | path join plz.nu)
+#   # then add to config.nu:   source plz.nu
+$env.config.hooks.pre_execution = (
+  $env.config.hooks.pre_execution? | default [] | append {||
+    # stored as a record so it is NOT exported to child processes (no leak
+    # into nested scripts); still readable by the `plz` command below.
+    $env.PLZ = { cmd: (commandline) }
+  }
+)
+
+# Resolve the engine option list from the captured command line. Reads only
+# $env.PLZ (never $in), so it can run without disturbing the piped input.
+# Errors if the pipeline is ambiguous (two identical plz calls, different
+# neighbors).
+def __plz_opts [...rest] {
+  mut opts = ["--shell" "nu"]
+  let cmdline = ($env.PLZ?.cmd? | default "")
+  if ($cmdline | is-not-empty) {
+    let toks = (
+      ast $cmdline --flatten --json | from json
+      | uniq-by span
+      | each {|x| if $x.shape == "shape_pipe" { "|" } else { $x.content } }
+    )
+    let out = ($toks | str join "\n" | ^plz __locate ...$rest | split row "\n")
+    let s = ($out | get 0? | default "")
+    let f = ($out | get 1? | default "")
+    let t = ($out | get 2? | default "")
+    if $s == "ambiguous" {
+      error make {msg: "plz: ambiguous pipeline — two identical 'plz' calls with different neighbors. Vary one prompt to disambiguate."}
+    }
+    if ($f | is-not-empty) { $opts = ($opts | append ["--piped-from" $f]) }
+    if ($t | is-not-empty) { $opts = ($opts | append ["--piped-to" $t]) }
+  }
+  $opts
+}
+
+def --wrapped plz [...rest] {
+  # Inspect the input type without consuming/collecting $in (describe
+  # --no-collect is non-destructive). NOTE: after that, $in only survives if used
+  # at the TOP LEVEL — using it inside an `if` branch yields null. So we select a
+  # transform CLOSURE with the `if` (no $in in the branch) and pipe $in through
+  # it exactly once, at top level. Structured nushell data (table/record/list)
+  # becomes JSON so the model gets named fields instead of an ASCII-art table;
+  # plain text / byte streams pass through untouched and keep streaming.
+  let ty = ($in | describe --no-collect)
+  let structured = (($ty | str starts-with "table") or ($ty | str starts-with "record") or ($ty | str starts-with "list"))
+  let opts = (__plz_opts ...$rest)
+
+  # Find the downstream command (if any) so we can decide whether to emit a
+  # nushell value or plain text. We render structured output (JSON -> value)
+  # when plz is LAST, or when it feeds a native nushell command (where/select/
+  # sort-by/...). We keep TEXT when it feeds an external (jq/grep) or another plz.
+  let ti = ($opts | enumerate | where item == "--piped-to" | get index.0? | default (-1))
+  let downstream = (if $ti >= 0 { $opts | get ($ti + 1) } else { "" })
+  let dw = ($downstream | str trim | split row " " | get 0? | default "")
+  let dtype = (if ($dw | is-empty) { "" } else { (try { which $dw | get type | first } catch { "external" }) })
+  let render = (($downstream | is-empty) or ($dtype in ["keyword" "built-in"]))
+
+  let extra = (
+    (if $structured { ["--stdin-json" "--input-shape" $ty] } else { [] })
+    | append (if $render { ["--render-json"] } else { [] })
+  )
+  # in-closure: structured input -> JSON. out-closure: when rendering, parse the
+  # JSON output into a real nushell value (table) so the user / next nushell
+  # command gets structured data; fall back to raw text if it isn't JSON.
+  $in
+  | do (if $structured { {|| to json -r } } else { {|| $in } })
+  | ^plz ...$opts ...$extra ...$rest
+  | do (if $render { {|| let o = $in; try { $o | from json } catch { try { $o | from json --objects } catch { $o } } } } else { {|| $in } })
+}
+NU_GLUE
+      ;;
+    *)
+      echo "usage: plz init <zsh|nu>" >&2
+      return 1
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# transform: a pure LLM filter — reads stdin, applies natural-language
+# instructions, writes ONLY the transformed result. Generated commands can pipe
+# through this when a deterministic tool can't reliably structure the data.
+# ---------------------------------------------------------------------------
+
+do_transform() {
+  local instructions="$*"
+  claude --dangerously-skip-permissions -p "Apply this transformation to the input on stdin and output ONLY the result — no explanation, no preamble, no markdown code fences: $instructions" \
+    2> >(grep -v "claude.ai connectors are disabled" >&2)
+}
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "__locate" ]; then shift; do_locate "$@"; exit $?; fi
+if [ "${1:-}" = "init" ]; then shift; plz_init "$@"; exit $?; fi
+if [ "${1:-}" = "transform" ]; then shift; do_transform "$@"; exit $?; fi
+
+# ===========================================================================
+# engine
+# ===========================================================================
+
+before_plz=""
+after_plz=""
+shell_name=""
+user_input=""
+stdin_json=false
+input_shape=""
+render_json=false
+found_positional=false
+verbose=false
+args=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --piped-from)  before_plz="$2"; shift 2 ;;
+    --piped-to)    after_plz="$2";  shift 2 ;;
+    --shell)       shell_name="$2"; shift 2 ;;
+    --stdin-json)  stdin_json=true; shift ;;
+    --input-shape) input_shape="$2"; shift 2 ;;
+    --render-json) render_json=true; shift ;;
+    --verbose|-v) verbose=true; shift ;;
+    *)
+      if [[ "$1" != -* ]] && [[ "$found_positional" == false ]]; then
+        user_input="<user_input>$1</user_input>"
+        found_positional=true
+      else
+        args+=("$1")
+      fi
+      shift ;;
+  esac
+done
+
+if [ -z "$shell_name" ]; then
+  shell_name=$(ps -o comm= -p "$PPID" 2>/dev/null | sed 's#.*/##; s/^-//')
+  [ -z "$shell_name" ] && shell_name=$(basename "${SHELL:-sh}")
+fi
+
+# PLZ_DEBUG: show the resolved pipeline context and exit without reading stdin
+# or calling claude. Handy for confirming pipeline detection.
+if [ -n "${PLZ_DEBUG:-}" ]; then
+  {
+    echo "plz debug:"
+    echo "  shell:      $shell_name"
+    echo "  piped_from: $before_plz"
+    echo "  piped_to:   $after_plz"
+    echo "  request:    $user_input"
+  } >&2
+  exit 0
+fi
+
+prompt="You are plz: you turn a request into ONE shell command and nothing else.
+The command is run via bash. If input is piped in, it arrives on the command's stdin and the command's stdout is the result. Write POSIX/bash syntax, and read from stdin rather than assuming the input is small or finite.
+
+The user's interactive shell is: $shell_name."
+
+if [ -n "$before_plz" ]; then
+  prompt="$prompt
+
+The stdin input is produced by:
 <piped_from>
 $before_plz
 </piped_from>"
-  fi
-  
-  if [ -n "$after_plz" ]; then
-    prompt="$prompt
+fi
 
-Output will be piped to:
+if [ -n "$after_plz" ]; then
+  prompt="$prompt
+
+Your command's stdout is piped directly into:
 <piped_to>
 $after_plz
 </piped_to>
+So the command MUST emit exactly what '$after_plz' expects and nothing else — e.g. valid JSON for jq, raw columns for awk/sed, matchable text for grep — never prose. If the input is not already in that shape, your command must TRANSFORM it into that shape (e.g. parse each matching line into a JSON object when piping to jq) — do not just filter and pass the raw text through."
+fi
 
-IMPORTANT: Your output is NOT shown to a human — it is fed directly into '$after_plz'. It MUST be machine-readable data in exactly the format that command expects. Do NOT write prose, sentences, or explanations. For example:
-- If piping to 'jq', output valid JSON ONLY (e.g. {\"username\":\"x\",\"location\":null}), never a sentence
-- If piping to 'sed' or 'awk', output the raw text/columns those commands process
-- If piping to 'grep', output text with the expected patterns
-Because the output is consumed by another program, you should almost always use <cmd> to produce it. Use <response> ONLY if its content is itself valid input for '$after_plz'."
+# Peek only the first PREVIEW_BYTES bytes of stdin as a format hint. The rest of
+# the stream stays untouched in the pipe so the generated command can consume it
+# live — this is what lets `some_logger | plz "..."` stream instead of block.
+PREVIEW_BYTES="${PLZ_PREVIEW_BYTES:-1000}"
+has_stdin=false
+peekfile=""
+if [ ! -t 0 ]; then
+  has_stdin=true
+  peekfile=$(mktemp "${TMPDIR:-/tmp}/plz.peek.XXXXXX")
+  trap 'rm -f "$peekfile"' EXIT
+  # dd bs=1 does single-byte reads, so it consumes EXACTLY PREVIEW_BYTES and
+  # leaves the rest of the stream in the pipe. (head -c over-reads and would
+  # discard the remainder, truncating the input the command sees.)
+  dd bs=1 count="$PREVIEW_BYTES" > "$peekfile" 2>/dev/null
 
+  if [ "$stdin_json" = true ]; then
+    prompt="$prompt
+
+The piped input is JSON, serialized from the upstream command's structured ${shell_name} output${input_shape:+ of shape: $input_shape}. Treat stdin as JSON (e.g. parse with jq, referencing those columns/fields). First $PREVIEW_BYTES bytes (a format hint ONLY; your command receives the full input):
+<input_preview>
+$(cat "$peekfile")
+</input_preview>"
+  else
+    prompt="$prompt
+
+The first $PREVIEW_BYTES bytes of stdin (a format hint ONLY — your command receives the full, possibly unbounded stream):
+<input_preview>
+$(cat "$peekfile")
+</input_preview>"
   fi
 fi
 
-piped_input=""
-full_piped_input=""
-if [ ! -t 0 ]; then
-  full_piped_input=$(cat)
-  # Get first 10 lines for initial prompt
-  piped_input=$(echo "$full_piped_input" | head -n 10)
-  line_count=$(echo "$full_piped_input" | wc -l)
-  
+if [ "$render_json" = true ]; then
   prompt="$prompt
 
-<piped_input_preview>
-$piped_input"
-  
-  if [ "$line_count" -gt 10 ]; then
-    prompt="$prompt
-... (showing first 10 lines of $line_count total lines)"
-  fi
-  
-  prompt="$prompt
-</piped_input_preview>"
+Your stdout will be parsed as JSON by nushell and shown to the user as a TABLE (or fed to a nushell command). Emit ONE single JSON value. For multiple records, that MUST be a single JSON ARRAY of flat objects with the SAME keys in each — e.g. [{\"k\":1},{\"k\":2}]. Do NOT emit newline-delimited JSON or one object per line (no streaming jq with a trailing '.[]', no one-object-per-line). Use a single JSON object for one record, or a JSON scalar only for a genuine single value. JSON only — no prose."
 fi
 
 prompt="$prompt
 
-RESPONSE FORMAT RULES:
-plz DOES THINGS. You always run a command to accomplish what the user asked — never explain, never answer in prose, never print a command for the user to copy. Respond in ONE of these formats:
+For transformations that need real language understanding — turning unstructured or natural-language text into structured data, summarizing, classifying, fuzzy extraction — your command can pipe through 'plz transform \"<instructions>\"', an LLM filter that reads stdin and writes ONLY the transformed result. Prefer plain tools (grep/sed/awk/jq/cut) whenever they'll do the job reliably; they are faster and they stream. Reach for 'plz transform' only when a regex or parser would be brittle (it reads its whole input, so don't use it on unbounded streams).
 
-1. To accomplish the task, run a command (it receives the piped input on stdin):
-<cmd>command here</cmd>
-IMPORTANT: If your command needs to exit with an error, use exit code 42 (not 1) to avoid retries.
+Reply with ONLY one of these — no explanation, no preamble, no markdown fences:
+<cmd>the single shell command to run</cmd>
+<error>a short reason you cannot produce a command</error>
 
-2. To exit with an error message and non-zero exit code:
-<error>error message here</error>
-
-3. To request the full input (if you need more than the preview):
-</get_output>
-
-ALWAYS just do the thing with <cmd>. Whatever the user asks — extract, filter, transform, format, get, find, fetch, even \"give me a command to ...\" — write the command that does it and let it run. The command's own output is the result. Be terse: no commentary, no preamble.
-
-DO NOT include any text outside these tags.
+Whatever the request — extract, filter, transform, format, fetch, even \"give me a command to ...\" — answer with the <cmd> that does it. Its own stdout is the result. The command MUST handle the ENTIRE input — every line/record/item it contains, not just the first one (loop or operate over all of them).
 "
-
-user_input=""
-args=()
-found_positional=false
-verbose=false
-
-for arg in "$@"; do
-  if [[ "$arg" == "--verbose" ]] || [[ "$arg" == "-v" ]]; then
-    verbose=true
-    args+=("$arg")
-  elif [[ "$arg" != -* ]] && [[ "$found_positional" == false ]]; then
-    user_input="<user_input>$arg</user_input>"
-    found_positional=true
-  else
-    args+=("$arg")
-  fi
-done
 
 if [ -n "$user_input" ]; then
   args+=("-p" "$user_input")
 fi
 
-# Function to get Claude's response
 get_claude_response() {
   local prompt_to_send="$1"
-  # Filter out the claude.ai connectors warning while keeping other stderr
   echo "$prompt_to_send" | claude --dangerously-skip-permissions "${args[@]}" \
     2> >(grep -v "claude.ai connectors are disabled" >&2)
 }
 
-# Function to handle response
+# Run the model's command against the live stream: replay the peeked bytes, then
+# hand the rest of stdin straight through so output streams (nothing buffered).
+run_generated_cmd() {
+  local cmd="$1"
+  cmd=$(echo "$cmd" | sed "s/sed '\\([0-9]*i\\\\\\)\\([^']*\\)'/sed '\\1\\\n\\2'/g")
+  if [ "$verbose" = true ]; then echo "→ Running: $cmd" >&2; fi
+  if [ "$has_stdin" = true ]; then
+    # Guarantee the input ends with a newline. nushell pipes strings WITHOUT a
+    # trailing newline, which makes the common `while read` loop silently drop
+    # the last (unterminated) item. `awk '{print}'` adds the missing final
+    # newline without doubling an existing one; fflush keeps it streaming.
+    { cat "$peekfile"; cat; } | awk '{print; fflush()}' | bash -c "$cmd"
+  else
+    bash -c "$cmd"
+  fi
+}
+
 handle_response() {
   local response="$1"
   local current_prompt="$2"
   local retry_count="${3:-0}"
-  
-  
-  # Check for <cmd> tag (multiline support)
+
+  # A command — run it and pass its exit code through. Output already streamed.
   if echo "$response" | grep -q "<cmd>"; then
-    # Use awk parsing to avoid HTML entity encoding issues
-    local cmd=$(echo "$response" | awk '/<cmd>/{flag=1; gsub(/^.*<cmd>/, ""); if(/<\/cmd>/) {gsub(/<\/cmd>.*$/, ""); print; exit} else print; next} /<\/cmd>/{gsub(/<\/cmd>.*$/, ""); print; flag=0; exit} flag')
-    
+    # Take everything after the first <cmd>, then cut at the first terminator.
+    # The nested model sometimes appends its own tool-call tags (</invoke> etc.)
+    # instead of a clean </cmd>, so we stop at those too and strip any residual
+    # markup before it can reach the shell.
+    local cmd="${response#*<cmd>}"
+    cmd="${cmd%%</cmd>*}"
+    cmd="${cmd%%</invoke>*}"
+    cmd="${cmd%%</parameter>*}"
+    cmd="${cmd%%</function_calls>*}"
+    cmd=$(printf '%s' "$cmd" | sed -E 's#</?(cmd|invoke|parameter|function_calls|function)[^>]*>##g; s#</?antml:[A-Za-z_]+[^>]*>##g')
+    cmd="${cmd#"${cmd%%[![:space:]]*}"}"   # trim leading whitespace/newlines
+    cmd="${cmd%"${cmd##*[![:space:]]}"}"   # trim trailing whitespace/newlines
     if [ -n "$cmd" ]; then
-      if [ "$verbose" = true ]; then
-        echo "→ Running: $cmd" >&2
-      fi
-      
-      # Fix common sed issues before executing
-      # Fix sed 'i\' commands that are missing newlines
-      cmd=$(echo "$cmd" | sed "s/sed '\\([0-9]*i\\\\\\)\\([^']*\\)'/sed '\\1\\\n\\2'/g")
-      
-      
-      # Execute command and capture errors
-      local error_output
-      if [ -n "$full_piped_input" ]; then
-        error_output=$(echo "$full_piped_input" | bash -c "$cmd" 2>&1)
-        local exit_code=$?
-      else
-        error_output=$(bash -c "$cmd" 2>&1)
-        local exit_code=$?
-      fi
-      
-      if [ $exit_code -eq 0 ]; then
-        echo "$error_output"
-        return 0
-      elif [ $exit_code -eq 42 ]; then
-        # Special exit code 42 - intentional error, don't retry
-        echo -n "$error_output" >&2
-        exit 1
-      else
-        # Command failed - ask Claude to try again (with retry limit)
-        if [ "$retry_count" -ge 3 ]; then
-          echo "Too many retries. Command failed with error: $error_output" >&2
-          exit 1
-        fi
-        
-        local retry_prompt="$current_prompt
-
-Your command failed with this error:
-$error_output
-
-Please provide a corrected command using <cmd>corrected_command</cmd> or a direct response using <response>answer</response>"
-        
-        local retry_response=$(get_claude_response "$retry_prompt")
-        handle_response "$retry_response" "$retry_prompt" $((retry_count + 1))
-        return $?
-      fi
+      run_generated_cmd "$cmd"
+      exit $?
     fi
   fi
-  
-  # Check for <error> tag (multiline support)
+
+  # An explicit refusal.
   if echo "$response" | grep -q "<error>"; then
     local error_message=$(echo "$response" | sed -n '/<error>/,/<\/error>/p' | sed '1s/^.*<error>//' | sed '$s/<\/error>.*$//' | sed '/^[[:space:]]*$/d')
     if [ -n "$error_message" ]; then
@@ -247,40 +416,21 @@ Please provide a corrected command using <cmd>corrected_command</cmd> or a direc
       exit 1
     fi
   fi
-  
-  # Check for </get_output> tag
-  if echo "$response" | grep -q "^</get_output>$"; then
-    local new_prompt="$current_prompt
 
-<full_piped_input>
-$full_piped_input
-</full_piped_input>
-
-Now respond using one of the required formats:
-<cmd>command</cmd>"
-    
-    local new_response=$(get_claude_response "$new_prompt")
-    handle_response "$new_response" "$new_prompt" "$retry_count"
-    return $?
+  # Neither — the model added prose/fences. Re-ask (nothing has been consumed).
+  if [ "$retry_count" -ge 2 ]; then
+    echo "plz: couldn't get a command from the model." >&2
+    exit 1
   fi
-  
-  # Response doesn't match format - retry once
   local retry_prompt="$current_prompt
 
-Your previous response was:
+Your previous reply was not a single tagged command:
 $response
 
-This does not match the required format. Please respond again using ONLY one of these formats:
-<cmd>command to run</cmd>
-<error>error message</error>
-</get_output>"
-  
+Reply again with ONLY <cmd>…</cmd> or <error>…</error> and no other text."
   local retry_response=$(get_claude_response "$retry_prompt")
-  
-  # The retry will be handled by the recursive call to handle_response above
-  # This section is now redundant since we use recursion
+  handle_response "$retry_response" "$retry_prompt" $((retry_count + 1))
 }
 
-# Get initial response
 response=$(get_claude_response "$prompt")
 handle_response "$response" "$prompt"
