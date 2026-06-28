@@ -223,6 +223,37 @@ do_transform() {
     2> >(grep -v "claude.ai connectors are disabled" >&2)
 }
 
+plz_help() {
+  cat <<'EOF'
+plz — a terminal assistant you pipe through (powered by Claude).
+
+USAGE
+  plz "<request>"            Generate and run a command for <request>. Piped input
+                             is fed to that command on stdin; its output is the result.
+  <cmd> | plz "<request>"    Act on / transform piped input.
+  plz "<request>" | <cmd>    plz tailors its output for the next command.
+
+OTHER COMMANDS
+  plz transform "<rules>"    Pure LLM filter: read stdin, apply <rules>, print result.
+  plz init <zsh|nu>          Print shell integration (makes plz pipeline-aware).
+  plz --help                 Show this help.
+
+FLAGS
+  -v, --verbose              Print the command being run (to stderr).
+
+ENV
+  PLZ_DEBUG=1                Show resolved pipeline context and exit (no Claude call).
+  PLZ_PREVIEW_BYTES=N        Bytes of stdin previewed to the model (default 50).
+
+SETUP
+  Put `plz` on your PATH, then wire up your shell:
+    zsh:      eval "$(plz init zsh)"      # add to ~/.zshrc
+    nushell:  plz init nu | save -f ($nu.default-config-dir | path join plz.nu)
+              # then add `source plz.nu` to config.nu
+  Requires the `claude` CLI, installed and authenticated.
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # dispatch
 # ---------------------------------------------------------------------------
@@ -230,6 +261,10 @@ do_transform() {
 if [ "${1:-}" = "__locate" ]; then shift; do_locate "$@"; exit $?; fi
 if [ "${1:-}" = "init" ]; then shift; plz_init "$@"; exit $?; fi
 if [ "${1:-}" = "transform" ]; then shift; do_transform "$@"; exit $?; fi
+# Help can appear anywhere in the args (the shell wrappers prepend --shell/etc.),
+# so scan all of them, not just $1.
+for _a in "$@"; do case "$_a" in --help|-h|help) plz_help; exit 0 ;; esac; done
+if [ "$#" -eq 0 ] && [ -t 0 ]; then plz_help; exit 0; fi
 
 # ===========================================================================
 # engine

@@ -117,16 +117,6 @@ curl -s https://api.github.com/users/zachdaniel | plz "get the username and loca
 }
 ```
 
-### It streams — pipe a live source into it
-
-`plz` doesn't buffer stdin. It peeks the first few bytes (just to see the format),
-then runs the generated command against the **live** stream, so unbounded sources
-work and output flows as it's produced:
-
-```bash
-tail -f /var/log/app.log | plz "only show lines that look like errors"
-```
-
 ### It understands nushell's structured data
 
 When you pipe a nushell value (a table, record, or list) into `plz`, the wrapper
