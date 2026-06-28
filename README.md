@@ -12,13 +12,13 @@ echo "zachdaniel,josevalim"
   | jq . 
   | plz "capitalize the keys"
   | where Username == "zachdaniel"
-```
 
 ╭───┬────────────┬────────────────╮
 │ # │  Username  │    Location    │
 ├───┼────────────┼────────────────┤
 │ 0 │ zachdaniel │ Summit, NJ     │
 ╰───┴────────────┴────────────────╯
+```
 
 ## Installation
 
