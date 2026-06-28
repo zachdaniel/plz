@@ -2,6 +2,8 @@
 
 A wildly dangerous piece of shell magic that runs claude in yolo mode to do whatever you want.
 
+(yes, this is a shitpost)
+
 See the examples below. Anyone who lives out of shell will get why this is cool.
 
 ## Magic Shell Command that integrates well with `nushell`
