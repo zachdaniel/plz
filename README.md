@@ -63,7 +63,6 @@ Bob
 It also knows what data format it needs to go *to* (i.e json, because of jq)
 
 ```bash
-# knows that its piping into `jq .` and so must provide json format
 curl -s https://api.github.com/users/zachdaniel | plz "get the username and location" | jq .
 ```
 
