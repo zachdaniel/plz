@@ -78,7 +78,7 @@ curl -s https://api.github.com/users/zachdaniel | plz "get the username and loca
 ### Put it all together
 
 ```nushell
-"zachdaniel,josevalim" | plz "get their github usernames and locations" | jq . | plz "capitalize the keys"
+echo "zachdaniel,josevalim" | plz "get their github usernames and locations" | jq . | plz "capitalize the keys"
 ```
 
 #### Output (any shell)
