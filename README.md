@@ -4,6 +4,22 @@ A wildly dangerous piece of shell magic that runs claude in yolo mode to do what
 
 See the examples below. Anyone who lives out of shell will get why this is cool.
 
+## Magic Shell Command that integrates well with `nushell`
+
+```nushell
+echo "zachdaniel,josevalim" 
+  | plz "get their github usernames and locations" 
+  | jq . 
+  | plz "capitalize the keys"
+  | where Username == "zachdaniel"
+```
+
+╭───┬────────────┬────────────────╮
+│ # │  Username  │    Location    │
+├───┼────────────┼────────────────┤
+│ 0 │ zachdaniel │ Summit, NJ     │
+╰───┴────────────┴────────────────╯
+
 ## Installation
 
 Put the single `plz` script on your `PATH`. Then wire up your shell so `plz`
@@ -16,6 +32,22 @@ locate the running `plz` within the pipeline — no fragile string munging. If a
 pipeline contains two identical `plz "…"` calls with different neighbors (so the
 correct output format is genuinely ambiguous), `plz` errors out loudly instead
 of guessing.
+
+`plz` shells out to the [`claude`](https://docs.claude.com/claude-code) CLI,
+which must be installed and authenticated.
+
+### Get the script
+
+With Homebrew (no separate tap repo — tap this repo by URL and install `--HEAD`):
+
+```sh
+brew tap zachdaniel/plz https://github.com/zachdaniel/plz
+brew install --HEAD plz
+```
+
+Or just drop the single `plz` file anywhere on your `PATH`.
+
+Then wire up your shell:
 
 ### Zsh
 

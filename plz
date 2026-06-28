@@ -124,7 +124,7 @@ plz() {
     print -u2 "plz: ambiguous pipeline — two identical 'plz' calls with different neighbors. Vary one prompt to disambiguate."
     return 1
   fi
-  command plz --shell zsh ${f:+--piped-from "$f"} ${t:+--piped-to "$t"} "$@"
+  command plz --shell zsh ${__PLZ_CMD:+--pipeline "$__PLZ_CMD"} ${f:+--piped-from "$f"} ${t:+--piped-to "$t"} "$@"
 }
 ZSH_GLUE
       ;;
@@ -149,6 +149,7 @@ def __plz_opts [...rest] {
   mut opts = ["--shell" "nu"]
   let cmdline = ($env.PLZ?.cmd? | default "")
   if ($cmdline | is-not-empty) {
+    $opts = ($opts | append ["--pipeline" $cmdline])
     let toks = (
       ast $cmdline --flatten --json | from json
       | uniq-by span
@@ -241,6 +242,7 @@ user_input=""
 stdin_json=false
 input_shape=""
 render_json=false
+full_pipeline=""
 found_positional=false
 verbose=false
 args=()
@@ -253,6 +255,7 @@ while [ "$#" -gt 0 ]; do
     --stdin-json)  stdin_json=true; shift ;;
     --input-shape) input_shape="$2"; shift 2 ;;
     --render-json) render_json=true; shift ;;
+    --pipeline)    full_pipeline="$2"; shift 2 ;;
     --verbose|-v) verbose=true; shift ;;
     *)
       if [[ "$1" != -* ]] && [[ "$found_positional" == false ]]; then
@@ -287,6 +290,16 @@ prompt="You are plz: you turn a request into ONE shell command and nothing else.
 The command is run via bash. If input is piped in, it arrives on the command's stdin and the command's stdout is the result. Write POSIX/bash syntax, and read from stdin rather than assuming the input is small or finite.
 
 The user's interactive shell is: $shell_name."
+
+if [ -n "$full_pipeline" ]; then
+  prompt="$prompt
+
+You are ONE stage in this shell pipeline:
+<pipeline>
+$full_pipeline
+</pipeline>
+You are responsible ONLY for the 'plz' step described by the request below; the other stages run separately, so do not redo their work. But use the WHOLE pipeline to understand intent and to stay consistent with it — in particular, if a later stage references specific field/column names (e.g. 'where Username', 'select Foo'), produce those exact names, and honor naming implied by earlier steps' requests."
+fi
 
 if [ -n "$before_plz" ]; then
   prompt="$prompt
